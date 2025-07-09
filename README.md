@@ -219,11 +219,7 @@ Our evaluation follows rigorous scientific principles:
 
 ## 🎨 Visualizing Corrections
 
-Neural Ballast generates intuitive visualizations showing how corrections work:
-
-![Correction Example](correction_example.png)
-
-*Left: Original problematic input | Center: Applied noise pattern | Right: Corrected input*
+Neural Ballast generates intuitive visualizations showing how corrections work.
 
 ## ⚙️ Advanced Configuration
 
