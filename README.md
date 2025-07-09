@@ -6,20 +6,9 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-## 🚀 What is Neural Ballast?
+##  What is Neural Ballast?
 
-Neural Ballast is a novel technique that automatically detects when neural network inputs fall into computational "dead zones" and applies minimal corrective nudging to restore reliable model behavior. 
-
-### The Problem: Dead Zones in ReLU Networks
-
-ReLU-based neural networks can have regions where many neurons become inactive, leading to:
-- 📉 **Reduced model expressiveness** in certain input regions
-- 🎯 **Unpredictable inference behavior** for edge-case inputs  
-- 🔄 **Degenerate Jacobian matrices** with many near-zero singular values
-
-### The Solution: Minimal Corrective Nudging
-
-Neural Ballast detects these problematic inputs using **Singular Foliation Dimension (SingFolDIM)** analysis and applies tiny, carefully controlled noise to "nudge" inputs into healthier computational regions.
+Neural Ballast is a novel technique that automatically detects when neural network inputs fall into computational "dead zones" and applies minimal corrective nudging with noise to restore reliable model behavior. 
 
 ## 🏗️ Architecture Overview
 
@@ -34,16 +23,16 @@ graph LR
     E --> G[Model Prediction]
 ```
 
-## 📊 Key Results
+## Results
 
-Our robust evaluation demonstrates Neural Ballast's effectiveness:
+Robust evaluation demonstrates Neural Ballast's effectiveness:
 
 - **✅ Correction Rate: 96%** - Successfully fixes misclassified dead zone inputs
 - **✅ Regression Rate: 1%** - Minimal impact on correctly classified inputs  
 - **⚡ Low Overhead: ~15ms** - Fast dead zone detection and correction
 - **🎯 Conservative Approach** - Applies minimal noise (σ=0.01) for semantic preservation
 
-## 🧪 Quick Demo
+##  Demo
 
 ```python
 import torch
@@ -157,7 +146,7 @@ neural-ballast/
 └── 🚀 activate.bat       # Quick environment activation
 ```
 
-## 🔬 How It Works: The Science
+## 🔬 How It Works
 
 ### 1. Dead Zone Detection with SingFolDIM
 
@@ -194,7 +183,7 @@ def apply_corrective_nudge(model, bad_input, max_attempts=10, sigma=0.01):
 - **Gaussian noise**: Provides omnidirectional exploration
 - **Conservative approach**: Only apply when absolutely necessary
 
-## 📈 Evaluation Methodology
+## 📈 Evaluation
 
 Our evaluation follows rigorous scientific principles:
 
@@ -216,10 +205,6 @@ Our evaluation follows rigorous scientific principles:
 - **Regression Rate**: `(Broken correct predictions) / (Total correct predictions)`
 - **Dead Zone Detection Rate**: Percentage of inputs flagged as problematic
 - **Correction Success Rate**: Percentage of successful nudge attempts
-
-## 🎨 Visualizing Corrections
-
-Neural Ballast generates intuitive visualizations showing how corrections work.
 
 ## ⚙️ Advanced Configuration
 
@@ -246,59 +231,6 @@ from src.correction import batch_corrective_nudge
 # Process entire batches efficiently
 batch = torch.randn(32, 1, 28, 28)
 corrected_batch = batch_corrective_nudge(model, batch, is_in_dead_zone)
-```
-
-## 🔬 Theoretical Foundation
-
-Neural Ballast is based on cutting-edge research:
-
-- **[SingFolDIM Repository](https://github.com/eliot-tron/SingFolDIM)** - Core diagnostic technique
-- **[Theoretical Paper](https://arxiv.org/html/2409.07412v1)** - Mathematical foundations
-- **Singular Foliation Theory** - Understanding degenerate behavior in neural networks
-
-### Key Theoretical Insights
-
-1. **Dead zones correspond to low-rank Jacobian regions**
-2. **Small perturbations can restore full-rank behavior**  
-3. **Minimal noise preserves semantic content while fixing computational issues**
-
-## 🚀 Quick Start Guide
-
-### For Researchers
-
-```bash
-# Clone and setup
-git clone https://github.com/your-repo/neural-ballast
-cd neural-ballast
-.\setup.ps1
-
-# Run comprehensive evaluation
-python robust_evaluate.py
-
-# Analyze results
-python -c "
-import json
-with open('evaluation_results.json') as f:
-    results = json.load(f)
-print(f'Correction Rate: {results[\"correction_rate\"]:.1%}')
-print(f'Regression Rate: {results[\"regression_rate\"]:.1%}')
-"
-```
-
-### For Practitioners
-
-```python
-# Minimal integration example
-from src.ballast import NeuralBallast
-
-# Wrap your existing model
-protected_model = NeuralBallast(your_model)
-
-# Use as drop-in replacement
-predictions = protected_model.predict(your_inputs)
-
-# Check performance statistics
-protected_model.print_statistics()
 ```
 
 ## 📋 Requirements
