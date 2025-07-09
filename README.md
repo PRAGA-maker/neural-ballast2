@@ -38,7 +38,7 @@ graph LR
 
 Our robust evaluation demonstrates Neural Ballast's effectiveness:
 
-- **✅ Correction Rate: 67.8%** - Successfully fixes misclassified dead zone inputs
+- **✅ Correction Rate: 94.8%** - Successfully fixes misclassified dead zone inputs
 - **✅ Regression Rate: 2.1%** - Minimal impact on correctly classified inputs  
 - **⚡ Low Overhead: ~15ms** - Fast dead zone detection and correction
 - **🎯 Conservative Approach** - Applies minimal noise (σ=0.01) for semantic preservation
