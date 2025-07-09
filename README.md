@@ -360,4 +360,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
-**Neural Ballast** - *Making neural networks more reliable, one nudge at a time.* 🧠⚖️
+**Neural Ballast**
