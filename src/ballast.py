@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 from typing import Union, Optional
 
-from model import create_model, MNISTNet
-from diagnostic import is_in_dead_zone, get_singfol_dim
-from correction import apply_corrective_nudge
+from .model import create_model, MNISTNet
+from .diagnostic import is_in_dead_zone, get_singfol_dim
+from .correction import apply_corrective_nudge
 
 
 class NeuralBallast:

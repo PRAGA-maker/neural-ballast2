@@ -20,597 +20,448 @@ Usage:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
 import numpy as np
-import matplotlib.pyplot as plt
-import os
-import sys
-import random
-from typing import List, Dict, Tuple
 import json
-from datetime import datetime
+import matplotlib.pyplot as plt
+import time
+from pathlib import Path
 
-# Add src directory to Python path
-sys.path.append('src')
+# Import our modules
+from src.model import MNISTNet
+from src.ballast import NeuralBallast
+from src.curvature_attack import FisherInformationAttack, generate_curvature_attacks
 
-from model import create_model, MNISTNet
-from ballast import NeuralBallast
-from diagnostic import is_in_dead_zone, get_singfol_dim
-from correction import apply_corrective_nudge
-
-
-class RobustEvaluator:
-    """Comprehensive evaluation suite for Neural Ballast."""
+def load_model_and_data():
+    """Load the trained model and MNIST test dataset."""
+    print("Loading model from src/mnist_net.pth...")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    def __init__(self, model_path: str = "src/mnist_net.pth", verbose: bool = True):
-        """
-        Initialize the evaluator.
-        
-        Args:
-            model_path: Path to the trained model
-            verbose: Whether to print detailed progress
-        """
-        self.verbose = verbose
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Load model
-        self.model = self._load_model(model_path)
-        
-        # Create ballast wrapper
-        self.ballast = NeuralBallast(
-            model=self.model,
-            dim_threshold=1,
-            noise_sigma=0.01,
-            max_attempts=10,
-            verbose=False  # Suppress individual corrections for cleaner output
-        )
-        
-        # Load MNIST test dataset
-        self.test_dataset = self._load_test_dataset()
-        
-        # Initialize results storage
-        self.results = {
-            'problematic_set': [],
-            'control_set': [],
-            'evaluation_time': None,
-            'correction_rate': 0.0,
-            'regression_rate': 0.0,
-            'summary_stats': {}
-        }
-    
-    def _load_model(self, model_path: str) -> nn.Module:
-        """Load the trained MNIST model."""
-        if self.verbose:
-            print(f"Loading model from {model_path}...")
-        
-        if not os.path.exists(model_path):
-            print(f"Model file not found at {model_path}")
-            print("Creating new model (will not be trained)...")
-            return create_model()
-        
-        model = create_model()
-        checkpoint = torch.load(model_path, map_location=self.device)
-        
-        # Handle different checkpoint formats
+    # Load model
+    model = MNISTNet()
+    try:
+        checkpoint = torch.load('src/mnist_net.pth', map_location=device)
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
         else:
             model.load_state_dict(checkpoint)
-        
-        model.to(self.device)
+        model.to(device)
         model.eval()
-        
-        if self.verbose:
-            print("✓ Model loaded successfully")
-        
-        return model
+        print(f"Created MNISTNet with {sum(p.numel() for p in model.parameters()):,} parameters")
+        print("✓ Model loaded successfully")
+    except Exception as e:
+        print(f"✗ Error loading model: {e}")
+        return None, None, None
     
-    def _load_test_dataset(self):
-        """Load MNIST test dataset."""
-        if self.verbose:
-            print("Loading MNIST test dataset...")
-        
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
-        ])
-        
-        test_dataset = torchvision.datasets.MNIST(
-            root='src/data', 
-            train=False, 
-            download=True, 
-            transform=transform
-        )
-        
-        if self.verbose:
-            print(f"✓ Loaded {len(test_dataset)} test samples")
-        
-        return test_dataset
+    # Load MNIST test dataset
+    print("Loading MNIST test dataset...")
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
     
-    def generate_problematic_set(self, target_size: int = 100) -> List[Dict]:
-        """
-        Generate a set of inputs guaranteed to be in dead zones.
-        
-        Args:
-            target_size: Target number of problematic inputs
-            
-        Returns:
-            List of dictionaries containing problematic inputs and metadata
-        """
-        if self.verbose:
-            print(f"\n🔍 Generating problematic set (target: {target_size} samples)...")
-        
-        problematic_inputs = []
-        max_total_attempts = target_size * 50  # Reasonable upper bound
-        attempts = 0
-        
-        while len(problematic_inputs) < target_size and attempts < max_total_attempts:
-            attempts += 1
-            
-            # Try different strategies to generate dead zone inputs
-            dead_zone_input = self._generate_single_dead_zone_input()
-            
-            if dead_zone_input is not None:
-                # Get original label (if started from dataset sample)
-                original_idx = random.randint(0, len(self.test_dataset) - 1)
-                _, original_label = self.test_dataset[original_idx]
-                
-                # Test baseline model prediction
-                with torch.no_grad():
-                    baseline_output = self.model(dead_zone_input)
-                    baseline_pred = baseline_output.argmax(dim=1).item()
-                    baseline_confidence = torch.softmax(baseline_output, dim=1).max().item()
-                
-                # Store the problematic input
-                problematic_inputs.append({
-                    'input_tensor': dead_zone_input.clone(),
-                    'original_label': original_label,
-                    'baseline_pred': baseline_pred,
-                    'baseline_confidence': baseline_confidence,
-                    'is_misclassified': baseline_pred != original_label,
-                    'singfol_dim': get_singfol_dim(self.model, dead_zone_input)
-                })
-                
-                if self.verbose and len(problematic_inputs) % 10 == 0:
-                    print(f"  Generated {len(problematic_inputs)}/{target_size} problematic inputs...")
-        
-        if self.verbose:
-            misclassified_count = sum(1 for item in problematic_inputs if item['is_misclassified'])
-            print(f"✓ Generated {len(problematic_inputs)} problematic inputs")
-            print(f"  - {misclassified_count} are misclassified by baseline model")
-            print(f"  - Average SingFolDIM: {np.mean([item['singfol_dim'] for item in problematic_inputs]):.2f}")
-        
-        return problematic_inputs
-    
-    def _generate_single_dead_zone_input(self) -> torch.Tensor:
-        """Generate a single input that is in a dead zone."""
-        strategies = [
-            self._strategy_noisy_sample,
-            self._strategy_gradient_based,
-            self._strategy_random_input
-        ]
-        
-        for strategy in strategies:
-            try:
-                result = strategy()
-                if result is not None and is_in_dead_zone(self.model, result):
-                    return result
-            except Exception:
-                continue
-        
-        return None
-    
-    def _strategy_noisy_sample(self) -> torch.Tensor:
-        """Strategy 1: Add noise to dataset samples."""
-        idx = random.randint(0, len(self.test_dataset) - 1)
-        sample_image, _ = self.test_dataset[idx]
-        
-        # Add various amounts of noise
-        noise_scales = [0.5, 1.0, 1.5, 2.0]
-        for noise_scale in noise_scales:
-            noise = torch.randn_like(sample_image) * noise_scale
-            noisy_input = sample_image + noise
-            noisy_input = torch.clamp(noisy_input, -3, 3)
-            input_tensor = noisy_input.unsqueeze(0).to(self.device)
-            
-            if is_in_dead_zone(self.model, input_tensor):
-                return input_tensor
-        
-        return None
-    
-    def _strategy_gradient_based(self) -> torch.Tensor:
-        """Strategy 2: Use gradient information to find dead zones."""
-        idx = random.randint(0, len(self.test_dataset) - 1)
-        sample_image, _ = self.test_dataset[idx]
-        input_tensor = sample_image.unsqueeze(0).to(self.device).requires_grad_(True)
-        
-        try:
-            output = self.model(input_tensor)
-            loss = output.sum()
-            loss.backward()
-            
-            grad = input_tensor.grad.data
-            perturbation_scales = [0.1, 0.5, 1.0]
-            
-            for scale in perturbation_scales:
-                perturbation = grad.sign() * scale * random.uniform(0.1, 1.0)
-                perturbed_input = input_tensor.detach() + perturbation
-                
-                if is_in_dead_zone(self.model, perturbed_input):
-                    return perturbed_input
-        except Exception:
-            pass
-        
-        return None
-    
-    def _strategy_random_input(self) -> torch.Tensor:
-        """Strategy 3: Generate random inputs."""
-        random_scales = [1.0, 2.0, 3.0]
-        for scale in random_scales:
-            random_input = torch.randn(1, 1, 28, 28).to(self.device) * scale
-            if is_in_dead_zone(self.model, random_input):
-                return random_input
-        
-        return None
-    
-    def generate_control_set(self, target_size: int = 100) -> List[Dict]:
-        """
-        Generate a control set of inputs that the baseline model classifies correctly.
-        
-        Args:
-            target_size: Target number of control inputs
-            
-        Returns:
-            List of dictionaries containing control inputs and metadata
-        """
-        if self.verbose:
-            print(f"\n✅ Generating control set (target: {target_size} samples)...")
-        
-        control_inputs = []
-        attempts = 0
-        max_attempts = target_size * 10  # Should be easy to find correct predictions
-        
-        while len(control_inputs) < target_size and attempts < max_attempts:
-            attempts += 1
-            
-            # Get a random sample from test set
-            idx = random.randint(0, len(self.test_dataset) - 1)
-            sample_image, true_label = self.test_dataset[idx]
-            input_tensor = sample_image.unsqueeze(0).to(self.device)
-            
-            # Check if baseline model predicts correctly
-            with torch.no_grad():
-                baseline_output = self.model(input_tensor)
-                baseline_pred = baseline_output.argmax(dim=1).item()
-                baseline_confidence = torch.softmax(baseline_output, dim=1).max().item()
-            
-            # Only include if correctly classified and reasonably confident
-            if baseline_pred == true_label and baseline_confidence > 0.7:
-                control_inputs.append({
-                    'input_tensor': input_tensor.clone(),
-                    'true_label': true_label,
-                    'baseline_pred': baseline_pred,
-                    'baseline_confidence': baseline_confidence,
-                    'in_dead_zone': is_in_dead_zone(self.model, input_tensor),
-                    'singfol_dim': get_singfol_dim(self.model, input_tensor)
-                })
-                
-                if self.verbose and len(control_inputs) % 20 == 0:
-                    print(f"  Generated {len(control_inputs)}/{target_size} control inputs...")
-        
-        if self.verbose:
-            dead_zone_count = sum(1 for item in control_inputs if item['in_dead_zone'])
-            print(f"✓ Generated {len(control_inputs)} control inputs")
-            print(f"  - Average confidence: {np.mean([item['baseline_confidence'] for item in control_inputs]):.3f}")
-            print(f"  - {dead_zone_count} are in dead zones despite correct classification")
-        
-        return control_inputs
-    
-    def run_correction_rate_test(self, problematic_set: List[Dict]) -> float:
-        """
-        Test how often Ballast corrects misclassified inputs from the problematic set.
-        
-        Args:
-            problematic_set: List of problematic inputs
-            
-        Returns:
-            float: Correction rate (0.0 to 1.0)
-        """
-        if self.verbose:
-            print(f"\n🔧 Running Correction Rate Test...")
-        
-        # Filter to only misclassified inputs
-        misclassified_inputs = [item for item in problematic_set if item['is_misclassified']]
-        
-        if len(misclassified_inputs) == 0:
-            if self.verbose:
-                print("⚠ No misclassified inputs found in problematic set")
-            return 0.0
-        
-        corrections = 0
-        
-        for i, item in enumerate(misclassified_inputs):
-            # Run through Ballast
-            ballast_output = self.ballast.predict(item['input_tensor'])
-            ballast_pred = ballast_output.argmax(dim=1).item()
-            ballast_confidence = torch.softmax(ballast_output, dim=1).max().item()
-            
-            # Check if prediction was corrected
-            was_corrected = ballast_pred == item['original_label']
-            if was_corrected:
-                corrections += 1
-            
-            # Store detailed results
-            item['ballast_pred'] = ballast_pred
-            item['ballast_confidence'] = ballast_confidence
-            item['was_corrected'] = was_corrected
-            
-            if self.verbose and (i + 1) % 10 == 0:
-                print(f"  Processed {i + 1}/{len(misclassified_inputs)} misclassified inputs...")
-        
-        correction_rate = corrections / len(misclassified_inputs)
-        
-        if self.verbose:
-            print(f"✓ Correction Rate: {corrections}/{len(misclassified_inputs)} = {correction_rate:.1%}")
-        
-        return correction_rate
-    
-    def run_regression_rate_test(self, control_set: List[Dict]) -> float:
-        """
-        Test how often Ballast breaks correctly classified inputs (regression rate).
-        
-        Args:
-            control_set: List of control inputs
-            
-        Returns:
-            float: Regression rate (0.0 to 1.0, lower is better)
-        """
-        if self.verbose:
-            print(f"\n⚖️ Running Regression Rate Test...")
-        
-        regressions = 0
-        
-        for i, item in enumerate(control_set):
-            # Run through Ballast
-            ballast_output = self.ballast.predict(item['input_tensor'])
-            ballast_pred = ballast_output.argmax(dim=1).item()
-            ballast_confidence = torch.softmax(ballast_output, dim=1).max().item()
-            
-            # Check if correct prediction was broken
-            was_regression = ballast_pred != item['true_label']
-            if was_regression:
-                regressions += 1
-            
-            # Store detailed results
-            item['ballast_pred'] = ballast_pred
-            item['ballast_confidence'] = ballast_confidence
-            item['was_regression'] = was_regression
-            
-            if self.verbose and (i + 1) % 20 == 0:
-                print(f"  Processed {i + 1}/{len(control_set)} control inputs...")
-        
-        regression_rate = regressions / len(control_set)
-        
-        if self.verbose:
-            print(f"✓ Regression Rate: {regressions}/{len(control_set)} = {regression_rate:.1%}")
-        
-        return regression_rate
-    
-    def visualize_correction_example(self, problematic_set: List[Dict], save_path: str = "correction_example.png"):
-        """
-        Create a visualization showing original, noise, and corrected images.
-        
-        Args:
-            problematic_set: List of problematic inputs
-            save_path: Path to save the visualization
-        """
-        if self.verbose:
-            print(f"\n🎨 Creating correction visualization...")
-        
-        # Find a good example (misclassified input that was corrected)
-        good_examples = [
-            item for item in problematic_set 
-            if item.get('is_misclassified', False) and item.get('was_corrected', False)
-        ]
-        
-        if not good_examples:
-            if self.verbose:
-                print("⚠ No good correction examples found for visualization")
-            return
-        
-        # Use the first good example
-        example = good_examples[0]
-        original_input = example['input_tensor']
-        
-        # Apply corrective nudge to get the corrected input
-        try:
-            corrected_input = apply_corrective_nudge(
-                model=self.model,
-                bad_input_tensor=original_input,
-                is_in_dead_zone_func=lambda m, x: is_in_dead_zone(m, x, 1),
-                max_attempts=10,
-                sigma=0.01
-            )
-            
-            # Calculate the noise that was added
-            noise = corrected_input - original_input
-            
-            # Create the visualization
-            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-            
-            # Original image
-            axes[0].imshow(original_input.squeeze().cpu().detach().numpy(), cmap='gray')
-            axes[0].set_title(f'Original Image\nBaseline Pred: {example["baseline_pred"]}\nTrue Label: {example["original_label"]}')
-            axes[0].axis('off')
-            
-            # Noise pattern
-            noise_img = noise.squeeze().cpu().detach().numpy()
-            im = axes[1].imshow(noise_img, cmap='RdBu', vmin=-0.1, vmax=0.1)
-            axes[1].set_title(f'Noise Pattern\nScale: ±{np.abs(noise_img).max():.3f}')
-            axes[1].axis('off')
-            plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
-            
-            # Corrected image
-            axes[2].imshow(corrected_input.squeeze().cpu().detach().numpy(), cmap='gray')
-            axes[2].set_title(f'Corrected Image\nBallast Pred: {example["ballast_pred"]}\nTrue Label: {example["original_label"]}')
-            axes[2].axis('off')
-            
-            plt.suptitle('Neural Ballast Correction Example', fontsize=16)
-            plt.tight_layout()
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            
-            if self.verbose:
-                print(f"✓ Visualization saved to {save_path}")
-            
-        except Exception as e:
-            if self.verbose:
-                print(f"⚠ Error creating visualization: {e}")
-    
-    def run_full_evaluation(self, 
-                           problematic_size: int = 100, 
-                           control_size: int = 100) -> Dict:
-        """
-        Run the complete evaluation suite.
-        
-        Args:
-            problematic_size: Size of problematic test set
-            control_size: Size of control test set
-            
-        Returns:
-            dict: Complete evaluation results
-        """
-        start_time = datetime.now()
-        
-        if self.verbose:
-            print("=" * 60)
-            print("🧪 NEURAL BALLAST ROBUST EVALUATION SUITE")
-            print("=" * 60)
-        
-        # Generate test sets
-        problematic_set = self.generate_problematic_set(problematic_size)
-        control_set = self.generate_control_set(control_size)
-        
-        # Run tests
-        correction_rate = self.run_correction_rate_test(problematic_set)
-        regression_rate = self.run_regression_rate_test(control_set)
-        
-        # Create visualization
-        self.visualize_correction_example(problematic_set)
-        
-        # Calculate summary statistics
-        ballast_stats = self.ballast.get_statistics()
-        
-        # Store results
-        self.results = {
-            'problematic_set': problematic_set,
-            'control_set': control_set,
-            'correction_rate': correction_rate,
-            'regression_rate': regression_rate,
-            'evaluation_time': (datetime.now() - start_time).total_seconds(),
-            'ballast_stats': ballast_stats,
-            'summary_stats': {
-                'problematic_set_size': len(problematic_set),
-                'control_set_size': len(control_set),
-                'problematic_misclassified': sum(1 for item in problematic_set if item.get('is_misclassified', False)),
-                'corrections_achieved': sum(1 for item in problematic_set if item.get('was_corrected', False)),
-                'regressions_occurred': sum(1 for item in control_set if item.get('was_regression', False))
-            }
-        }
-        
-        # Print final report
-        self.print_final_report()
-        
-        return self.results
-    
-    def print_final_report(self):
-        """Print a comprehensive final report."""
-        if not self.verbose:
-            return
-        
-        print("\n" + "=" * 60)
-        print("📊 FINAL EVALUATION REPORT")
-        print("=" * 60)
-        
-        # Key metrics
-        print(f"\n🎯 KEY METRICS:")
-        print(f"  Correction Rate: {self.results['correction_rate']:.1%}")
-        print(f"  Regression Rate: {self.results['regression_rate']:.1%}")
-        
-        # Dataset statistics
-        print(f"\n📊 DATASET STATISTICS:")
-        stats = self.results['summary_stats']
-        print(f"  Problematic Set Size: {stats['problematic_set_size']}")
-        print(f"  Control Set Size: {stats['control_set_size']}")
-        print(f"  Misclassified in Problematic Set: {stats['problematic_misclassified']}")
-        
-        # Ballast performance
-        print(f"\n⚙️ BALLAST PERFORMANCE:")
-        ballast_stats = self.results['ballast_stats']
-        print(f"  Total Predictions: {ballast_stats['total_predictions']}")
-        print(f"  Dead Zone Detections: {ballast_stats['dead_zone_detections']}")
-        print(f"  Successful Corrections: {ballast_stats['successful_corrections']}")
-        print(f"  Dead Zone Detection Rate: {ballast_stats['dead_zone_rate']:.1%}")
-        print(f"  Correction Success Rate: {ballast_stats['correction_success_rate']:.1%}")
-        
-        # Performance analysis
-        print(f"\n🔍 ANALYSIS:")
-        if self.results['correction_rate'] > 0.5:
-            print("  ✅ Good correction rate - Ballast effectively fixes dead zone issues")
-        else:
-            print("  ⚠️  Moderate correction rate - Room for improvement in dead zone handling")
-        
-        if self.results['regression_rate'] < 0.05:
-            print("  ✅ Low regression rate - Ballast doesn't harm correct predictions")
-        elif self.results['regression_rate'] < 0.1:
-            print("  ⚠️  Moderate regression rate - Some impact on correct predictions")
-        else:
-            print("  ❌ High regression rate - Ballast may be too aggressive")
-        
-        print(f"\n⏱️  Evaluation completed in {self.results['evaluation_time']:.1f} seconds")
-        print("=" * 60)
-    
-    def save_results(self, filename: str = "evaluation_results.json"):
-        """Save evaluation results to JSON file."""
-        # Prepare serializable results
-        serializable_results = {
-            'correction_rate': self.results['correction_rate'],
-            'regression_rate': self.results['regression_rate'],
-            'evaluation_time': self.results['evaluation_time'],
-            'ballast_stats': self.results['ballast_stats'],
-            'summary_stats': self.results['summary_stats'],
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        with open(filename, 'w') as f:
-            json.dump(serializable_results, f, indent=2)
-        
-        if self.verbose:
-            print(f"✓ Results saved to {filename}")
-
-
-def main():
-    """Main evaluation function."""
-    # Set random seeds for reproducibility
-    torch.manual_seed(42)
-    np.random.seed(42)
-    random.seed(42)
-    
-    # Create evaluator
-    evaluator = RobustEvaluator(verbose=True)
-    
-    # Run full evaluation
-    results = evaluator.run_full_evaluation(
-        problematic_size=100,
-        control_size=100
+    test_dataset = torchvision.datasets.MNIST(
+        root='src/data', train=False, download=True, transform=transform
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=1, shuffle=True
     )
     
-    # Save results
-    evaluator.save_results()
+    print(f"✓ Loaded {len(test_dataset)} test samples")
+    return model, test_loader, device
+
+def generate_curvature_based_problematic_set(model, ballast, test_loader, device, target_size=100):
+    """Generate problematic inputs using curvature-based attacks."""
+    print("🔬 CURVATURE-BASED PROBLEMATIC INPUT GENERATION")
+    print("=" * 60)
     
-    print("\n🎉 Evaluation complete! Check 'correction_example.png' for visualization.")
+    # Initialize Fisher Information Attack
+    fim_attack = FisherInformationAttack(model, device)
+    
+    problematic_inputs = []
+    misclassified_count = 0
+    total_attempts = 0
+    
+    attack_methods = [
+        ("OSSA", lambda x: fim_attack.one_step_spectral_attack(x, epsilon=0.15)),
+        ("TSSA", lambda x: fim_attack.two_step_spectral_attack(x, epsilon=0.2)),
+        ("Curvature", lambda x: fim_attack.curvature_enhanced_attack(x, epsilon=0.25)),
+        ("Targeted", lambda x: fim_attack.targeted_dead_zone_attack(x, ballast, epsilon=0.3))
+    ]
+    
+    method_stats = {method: {'attempts': 0, 'dead_zones': 0, 'misclassified': 0} 
+                   for method, _ in attack_methods}
+    
+    print(f"Generating {target_size} problematic inputs using curvature attacks...")
+    
+    with torch.no_grad():
+        for batch_idx, (data, targets) in enumerate(test_loader):
+            if len(problematic_inputs) >= target_size:
+                break
+                
+            data, targets = data.to(device), targets.to(device)
+            
+            # Original prediction
+            original_output = model(data)
+            original_pred = torch.argmax(original_output, dim=1)
+            
+            # Skip if already misclassified
+            if original_pred != targets:
+                continue
+            
+            # Try each attack method
+            for method_name, attack_func in attack_methods:
+                if len(problematic_inputs) >= target_size:
+                    break
+                    
+                try:
+                    total_attempts += 1
+                    method_stats[method_name]['attempts'] += 1
+                    
+                    # Generate adversarial example
+                    if method_name == "Targeted":
+                        adv_input = attack_func(data)
+                        if adv_input is None:
+                            continue
+                    else:
+                        adv_input = attack_func(data)
+                    
+                    # Test with ballast
+                    ballast_output = ballast(adv_input)
+                    ballast_pred = torch.argmax(ballast_output, dim=1)
+                    ballast_conf = F.softmax(ballast_output, dim=1).max()
+                    
+                    # Check if it's a dead zone (high SingFolDIM or low confidence)
+                    is_dead_zone = False
+                    singfoldim = 0
+                    
+                    if hasattr(ballast, 'last_singfoldim'):
+                        singfoldim = ballast.last_singfoldim
+                        is_dead_zone = singfoldim > 0
+                    
+                    # Alternative dead zone detection: low confidence
+                    if ballast_conf < 0.7:
+                        is_dead_zone = True
+                    
+                    if is_dead_zone:
+                        method_stats[method_name]['dead_zones'] += 1
+                    
+                    # Check if misclassified
+                    is_misclassified = ballast_pred != targets
+                    if is_misclassified:
+                        method_stats[method_name]['misclassified'] += 1
+                        misclassified_count += 1
+                    
+                    # Add to problematic set if dead zone or misclassified
+                    if is_dead_zone or is_misclassified:
+                        problematic_inputs.append({
+                            'input': adv_input.cpu(),
+                            'true_label': targets.cpu(),
+                            'baseline_pred': original_pred.cpu(),
+                            'ballast_pred': ballast_pred.cpu(),
+                            'ballast_conf': ballast_conf.cpu(),
+                            'singfoldim': singfoldim,
+                            'is_dead_zone': is_dead_zone,
+                            'is_misclassified': is_misclassified,
+                            'method': method_name,
+                            'original_input': data.cpu()
+                        })
+                        
+                        if len(problematic_inputs) % 10 == 0:
+                            print(f"  Generated {len(problematic_inputs)}/{target_size} problematic inputs...")
+                            
+                            # Show method effectiveness
+                            for m, stats in method_stats.items():
+                                if stats['attempts'] > 0:
+                                    dz_rate = stats['dead_zones'] / stats['attempts'] * 100
+                                    mis_rate = stats['misclassified'] / stats['attempts'] * 100
+                                    print(f"    {m}: {stats['attempts']} attempts, "
+                                          f"{dz_rate:.1f}% dead zones, {mis_rate:.1f}% misclassified")
+                
+                except Exception as e:
+                    print(f"    ⚠ Attack {method_name} failed: {e}")
+                    continue
+    
+    # Calculate statistics
+    avg_singfoldim = np.mean([p['singfoldim'] for p in problematic_inputs if p['singfoldim'] > 0]) if any(p['singfoldim'] > 0 for p in problematic_inputs) else 0
+    
+    print(f"✓ Generated {len(problematic_inputs)} problematic inputs")
+    print(f"  - {misclassified_count} are misclassified by baseline model")
+    print(f"  - Average SingFolDIM: {avg_singfoldim:.3f}")
+    
+    # Print final method statistics
+    print("\n📊 ATTACK METHOD EFFECTIVENESS:")
+    for method, stats in method_stats.items():
+        if stats['attempts'] > 0:
+            dz_rate = stats['dead_zones'] / stats['attempts'] * 100
+            mis_rate = stats['misclassified'] / stats['attempts'] * 100
+            print(f"  {method:10}: {stats['attempts']:3d} attempts, "
+                  f"{dz_rate:5.1f}% dead zones, {mis_rate:5.1f}% misclassified")
+    
+    return problematic_inputs
 
+def evaluate_correction_rate(ballast, problematic_set, device):
+    """Evaluate how often Neural Ballast corrects misclassified inputs."""
+    print("🔧 Running Correction Rate Test...")
+    
+    if not problematic_set:
+        print("⚠ No misclassified inputs found in problematic set")
+        return 0.0, {}
+    
+    misclassified_inputs = [p for p in problematic_set if p['is_misclassified']]
+    
+    if not misclassified_inputs:
+        print("⚠ No misclassified inputs found in problematic set")
+        return 0.0, {}
+    
+    corrections = 0
+    total = len(misclassified_inputs)
+    method_corrections = {}
+    
+    print(f"  Testing {total} misclassified inputs for correction...")
+    
+    with torch.no_grad():
+        for i, item in enumerate(misclassified_inputs):
+            # Test Neural Ballast correction
+            ballast_input = item['input'].to(device)
+            true_label = item['true_label'].to(device)
+            
+            ballast_output = ballast(ballast_input)
+            ballast_pred = torch.argmax(ballast_output, dim=1)
+            
+            if ballast_pred == true_label:
+                corrections += 1
+                method = item['method']
+                method_corrections[method] = method_corrections.get(method, 0) + 1
+            
+            if (i + 1) % 20 == 0:
+                print(f"    Processed {i + 1}/{total} misclassified inputs...")
+    
+    correction_rate = corrections / total if total > 0 else 0.0
+    print(f"✓ Correction Rate: {corrections}/{total} = {correction_rate:.1%}")
+    
+    # Show corrections by method
+    if method_corrections:
+        print("  Corrections by attack method:")
+        for method, count in method_corrections.items():
+            method_total = sum(1 for p in misclassified_inputs if p['method'] == method)
+            if method_total > 0:
+                rate = count / method_total * 100
+                print(f"    {method}: {count}/{method_total} ({rate:.1f}%)")
+    
+    return correction_rate, method_corrections
 
-if __name__ == '__main__':
+def create_curvature_correction_visualization(problematic_set, device):
+    """Create visualization showing curvature attack corrections."""
+    print("🎨 Creating curvature-based correction visualization...")
+    
+    # Find good examples for each attack method
+    method_examples = {}
+    for item in problematic_set:
+        method = item['method']
+        if method not in method_examples and item['is_dead_zone']:
+            method_examples[method] = item
+    
+    if not method_examples:
+        print("⚠ No good correction examples found for visualization")
+        return False
+    
+    # Create visualization
+    fig, axes = plt.subplots(2, len(method_examples), figsize=(4*len(method_examples), 8))
+    if len(method_examples) == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for col, (method, item) in enumerate(method_examples.items()):
+        original = item['original_input'].squeeze().numpy()
+        adversarial = item['input'].squeeze().numpy()
+        
+        # Denormalize for display
+        original = original * 0.3081 + 0.1307
+        adversarial = adversarial * 0.3081 + 0.1307
+        
+        # Original image
+        axes[0, col].imshow(original, cmap='gray')
+        axes[0, col].set_title(f'{method}\nOriginal (pred: {item["baseline_pred"].item()})')
+        axes[0, col].axis('off')
+        
+        # Adversarial image
+        axes[1, col].imshow(adversarial, cmap='gray')
+        axes[1, col].set_title(f'Attack Result\n(conf: {item["ballast_conf"]:.3f}, SFD: {item["singfoldim"]:.1f})')
+        axes[1, col].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig('curvature_attack_examples.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print("✓ Curvature attack examples saved as 'curvature_attack_examples.png'")
+    return True
+
+def main():
+    print("=" * 60)
+    print("🧪 NEURAL BALLAST CURVATURE-ENHANCED EVALUATION SUITE")
+    print("=" * 60)
+    
+    start_time = time.time()
+    
+    # Load model and data
+    model, test_loader, device = load_model_and_data()
+    if model is None:
+        return
+    
+    # Create Neural Ballast wrapper
+    ballast = NeuralBallast(model, noise_scale=0.01, threshold=0.1)
+    ballast.to(device)
+    ballast.eval()
+    
+    print("\n" + "=" * 60)
+    print("🔍 Generating problematic set using curvature attacks...")
+    print("=" * 60)
+    
+    # Generate problematic inputs using curvature-based attacks
+    problematic_set = generate_curvature_based_problematic_set(
+        model, ballast, test_loader, device, target_size=100
+    )
+    
+    print("\n" + "=" * 60)
+    print("🔧 EVALUATION PHASE")
+    print("=" * 60)
+    
+    # Evaluate correction rate
+    correction_rate, method_corrections = evaluate_correction_rate(ballast, problematic_set, device)
+    
+    # Generate control set (correctly classified inputs)
+    print("\n✅ Generating control set (target: 100 samples)...")
+    control_set = []
+    with torch.no_grad():
+        for data, targets in test_loader:
+            if len(control_set) >= 100:
+                break
+            
+            data, targets = data.to(device), targets.to(device)
+            output = model(data)
+            pred = torch.argmax(output, dim=1)
+            conf = F.softmax(output, dim=1).max()
+            
+            if pred == targets and conf > 0.9:  # High confidence correct predictions
+                control_set.append({
+                    'input': data.cpu(),
+                    'label': targets.cpu(),
+                    'confidence': conf.cpu()
+                })
+            
+            if len(control_set) % 20 == 0 and len(control_set) > 0:
+                print(f"  Generated {len(control_set)}/100 control inputs...")
+    
+    avg_control_conf = np.mean([item['confidence'].item() for item in control_set])
+    print(f"✓ Generated {len(control_set)} control inputs")
+    print(f"  - Average confidence: {avg_control_conf:.3f}")
+    
+    # Evaluate regression rate
+    print("\n⚖️ Running Regression Rate Test...")
+    regression_count = 0
+    dead_zones_in_control = 0
+    
+    with torch.no_grad():
+        for i, item in enumerate(control_set):
+            data = item['input'].to(device)
+            label = item['label'].to(device)
+            
+            ballast_output = ballast(data)
+            ballast_pred = torch.argmax(ballast_output, dim=1)
+            
+            if ballast_pred != label:
+                regression_count += 1
+            
+            # Check for dead zones in control set
+            if hasattr(ballast, 'last_singfoldim') and ballast.last_singfoldim > 0:
+                dead_zones_in_control += 1
+            
+            if (i + 1) % 20 == 0:
+                print(f"  Processed {i + 1}/{len(control_set)} control inputs...")
+    
+    regression_rate = regression_count / len(control_set) if control_set else 0.0
+    print(f"✓ Regression Rate: {regression_count}/{len(control_set)} = {regression_rate:.1%}")
+    
+    # Create visualizations
+    create_curvature_correction_visualization(problematic_set, device)
+    
+    # Ballast performance statistics
+    total_predictions = len(problematic_set) + len(control_set)
+    total_dead_zones = sum(1 for p in problematic_set if p['is_dead_zone']) + dead_zones_in_control
+    successful_corrections = sum(1 for p in problematic_set 
+                                if p['is_misclassified'] and p['ballast_pred'] == p['true_label'])
+    
+    dead_zone_rate = total_dead_zones / total_predictions if total_predictions > 0 else 0.0
+    correction_success_rate = successful_corrections / sum(1 for p in problematic_set if p['is_misclassified']) if any(p['is_misclassified'] for p in problematic_set) else 0.0
+    
+    # Final evaluation report
+    print("\n" + "=" * 60)
+    print("📊 FINAL CURVATURE-ENHANCED EVALUATION REPORT")
+    print("=" * 60)
+    
+    print("🎯 KEY METRICS:")
+    print(f"  Correction Rate: {correction_rate:.1%}")
+    print(f"  Regression Rate: {regression_rate:.1%}")
+    
+    print("📊 DATASET STATISTICS:")
+    print(f"  Problematic Set Size: {len(problematic_set)}")
+    print(f"  Control Set Size: {len(control_set)}")
+    print(f"  Misclassified in Problematic Set: {sum(1 for p in problematic_set if p['is_misclassified'])}")
+    
+    print("⚙️ BALLAST PERFORMANCE:")
+    print(f"  Total Predictions: {total_predictions}")
+    print(f"  Dead Zone Detections: {total_dead_zones}")
+    print(f"  Successful Corrections: {successful_corrections}")
+    print(f"  Dead Zone Detection Rate: {dead_zone_rate:.1%}")
+    print(f"  Correction Success Rate: {correction_success_rate:.1%}")
+    
+    print("🔍 ANALYSIS:")
+    if correction_rate >= 0.7:
+        print("  ✅ High correction rate - Ballast effectively handles problematic inputs")
+    elif correction_rate >= 0.4:
+        print("  ⚠️  Moderate correction rate - Room for improvement in dead zone handling")
+    else:
+        print("  ❌ Low correction rate - Ballast struggles with curvature-based attacks")
+    
+    if regression_rate <= 0.05:
+        print("  ✅ Low regression rate - Ballast doesn't harm correct predictions")
+    elif regression_rate <= 0.15:
+        print("  ⚠️  Moderate regression rate - Some interference with correct predictions")
+    else:
+        print("  ❌ High regression rate - Ballast significantly harms correct predictions")
+    
+    elapsed_time = time.time() - start_time
+    print(f"⏱️  Evaluation completed in {elapsed_time:.1f} seconds")
+    
+    # Save results
+    results = {
+        'curvature_enhanced_evaluation': True,
+        'correction_rate': correction_rate,
+        'regression_rate': regression_rate,
+        'problematic_set_size': len(problematic_set),
+        'control_set_size': len(control_set),
+        'misclassified_count': sum(1 for p in problematic_set if p['is_misclassified']),
+        'dead_zone_count': total_dead_zones,
+        'successful_corrections': successful_corrections,
+        'method_corrections': method_corrections,
+        'ballast_stats': {
+            'total_predictions': total_predictions,
+            'dead_zone_detections': total_dead_zones,
+            'dead_zone_rate': dead_zone_rate,
+            'correction_success_rate': correction_success_rate
+        },
+        'evaluation_time': elapsed_time,
+        'attack_methods_used': ['OSSA', 'TSSA', 'Curvature', 'Targeted']
+    }
+    
+    with open('curvature_evaluation_results.json', 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    print("=" * 60)
+    print("✓ Curvature-enhanced evaluation results saved to 'curvature_evaluation_results.json'")
+    print("🎉 Evaluation complete! Check 'curvature_attack_examples.png' for attack visualizations.")
+
+if __name__ == "__main__":
     main() 
