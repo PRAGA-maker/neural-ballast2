@@ -1,0 +1,20 @@
+{
+  "correction_rate": 0.0,
+  "regression_rate": 0.0,
+  "evaluation_time": 248.206376,
+  "ballast_stats": {
+    "total_predictions": 100,
+    "dead_zone_detections": 0,
+    "successful_corrections": 0,
+    "dead_zone_rate": 0.0,
+    "correction_success_rate": 0.0
+  },
+  "summary_stats": {
+    "problematic_set_size": 0,
+    "control_set_size": 100,
+    "problematic_misclassified": 0,
+    "corrections_achieved": 0,
+    "regressions_occurred": 0
+  },
+  "timestamp": "2025-07-08T21:16:46.524345"
+}
