@@ -259,33 +259,6 @@ python ballast.py          # Test complete wrapper
 cd src
 python train.py             # Train MNIST model from scratch
 ```
-
-## 🤝 Contributing
-
-We welcome contributions! Areas of interest:
-
-- 🔧 **Extensions to other architectures** (Transformers, ResNets)
-- 📊 **Additional evaluation metrics** 
-- ⚡ **Performance optimizations**
-- 🎨 **Visualization improvements**
-- 📚 **Documentation enhancements**
-
-## 📜 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- **SingFolDIM authors** for the theoretical foundation
-- **PyTorch team** for excellent deep learning tools
-- **MNIST dataset** for providing a reliable test case
-
-## 📞 Contact & Support
-
-- 📧 **Issues**: [GitHub Issues](https://github.com/your-repo/neural-ballast/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/your-repo/neural-ballast/discussions)
-- 📖 **Documentation**: [Wiki](https://github.com/your-repo/neural-ballast/wiki)
-
 ---
 
 **Neural Ballast**
