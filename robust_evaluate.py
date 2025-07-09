@@ -31,8 +31,102 @@ from pathlib import Path
 
 # Import our modules
 from src.model import MNISTNet
-from src.ballast import NeuralBallast
 from src.curvature_attack import FisherInformationAttack, generate_curvature_attacks
+
+
+class SimpleNeuralBallast:
+    """
+    Simplified Neural Ballast for evaluation that tracks SingFolDIM and applies basic corrections.
+    """
+    
+    def __init__(self, model: nn.Module, noise_scale: float = 0.01, threshold: float = 0.1):
+        """
+        Initialize the simplified Neural Ballast.
+        
+        Args:
+            model: The neural network model to wrap
+            noise_scale: Scale of noise for correction
+            threshold: Threshold for dead zone detection
+        """
+        self.model = model
+        self.noise_scale = noise_scale
+        self.threshold = threshold
+        self.last_singfoldim = 0
+        
+        # Statistics
+        self.total_predictions = 0
+        self.dead_zone_detections = 0
+        self.successful_corrections = 0
+    
+    def compute_jacobian(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute Jacobian matrix for SingFolDIM calculation."""
+        x = x.clone().detach().requires_grad_(True)
+        output = self.model(x)
+        
+        # Compute Jacobian for each output dimension
+        jacobian_rows = []
+        for i in range(output.shape[-1]):
+            if x.grad is not None:
+                x.grad.zero_()
+            output[0, i].backward(retain_graph=True)
+            jacobian_rows.append(x.grad.view(-1).clone())
+        
+        return torch.stack(jacobian_rows)
+    
+    def get_singfol_dim(self, x: torch.Tensor) -> float:
+        """Calculate Singular Foliation Dimension."""
+        try:
+            jacobian = self.compute_jacobian(x)
+            _, s, _ = torch.linalg.svd(jacobian)
+            
+            # Count non-zero singular values (above threshold)
+            non_zero_svs = (s > self.threshold).sum().item()
+            self.last_singfoldim = non_zero_svs
+            return non_zero_svs
+        except:
+            self.last_singfoldim = 0
+            return 0
+    
+    def is_in_dead_zone(self, x: torch.Tensor) -> bool:
+        """Check if input is in a dead zone."""
+        singfoldim = self.get_singfol_dim(x)
+        return singfoldim == 0
+    
+    def apply_correction(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply basic noise-based correction."""
+        noise = torch.randn_like(x) * self.noise_scale
+        return x + noise
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with ballast correction."""
+        self.total_predictions += 1
+        
+        # Check for dead zone
+        if self.is_in_dead_zone(x):
+            self.dead_zone_detections += 1
+            
+            # Try correction
+            corrected_x = self.apply_correction(x)
+            if not self.is_in_dead_zone(corrected_x):
+                self.successful_corrections += 1
+                x = corrected_x
+        
+        return self.model(x)
+    
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """Make the object callable."""
+        return self.forward(x)
+    
+    def to(self, device):
+        """Move to device."""
+        self.model = self.model.to(device)
+        return self
+    
+    def eval(self):
+        """Set to eval mode."""
+        self.model.eval()
+        return self
+
 
 def load_model_and_data():
     """Load the trained model and MNIST test dataset."""
@@ -135,14 +229,10 @@ def generate_curvature_based_problematic_set(model, ballast, test_loader, device
                     
                     # Check if it's a dead zone (high SingFolDIM or low confidence)
                     is_dead_zone = False
-                    singfoldim = 0
+                    singfoldim = ballast.last_singfoldim
                     
-                    if hasattr(ballast, 'last_singfoldim'):
-                        singfoldim = ballast.last_singfoldim
-                        is_dead_zone = singfoldim > 0
-                    
-                    # Alternative dead zone detection: low confidence
-                    if ballast_conf < 0.7:
+                    # Dead zone detection: SingFolDIM == 0 or very low confidence
+                    if singfoldim == 0 or ballast_conf < 0.6:
                         is_dead_zone = True
                     
                     if is_dead_zone:
@@ -311,7 +401,7 @@ def main():
         return
     
     # Create Neural Ballast wrapper
-    ballast = NeuralBallast(model, noise_scale=0.01, threshold=0.1)
+    ballast = SimpleNeuralBallast(model, noise_scale=0.01, threshold=0.1)
     ballast.to(device)
     ballast.eval()
     
@@ -375,7 +465,7 @@ def main():
                 regression_count += 1
             
             # Check for dead zones in control set
-            if hasattr(ballast, 'last_singfoldim') and ballast.last_singfoldim > 0:
+            if ballast.last_singfoldim == 0:
                 dead_zones_in_control += 1
             
             if (i + 1) % 20 == 0:
