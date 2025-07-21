@@ -1,0 +1,6 @@
+[submodule "2curve/external/CurvNetAttack"]
+	path = 2curve/external/CurvNetAttack
+	url = https://github.com/eliot-tron/CurvNetAttack
+[submodule "singfoildim/external/SingFolDIM"]
+	path = singfoildim/external/SingFolDIM
+	url = https://github.com/eliot-tron/SingFolDIM
